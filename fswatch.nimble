@@ -6,7 +6,7 @@ description   = "Tool for watching the Filesystem and executing some commands wh
 license       = "MIT"
 srcDir        = "src"
 installExt    = @["nim"]
-bin           = @["fwatch"]
+bin           = @["fswatch"]
 
 
 

@@ -1,4 +1,4 @@
-# Filesystem-Watcher which executes an program, when an watched file got changed.
+# Filesystem-Watcher command executes an program, when an watched file got changed.
 #
 # license: MIT
 # author: Raimund Hübel <raimund.huebel@googlemail.com>
@@ -6,37 +6,37 @@
 # compile and run + tooling:
 #
 #   ## Separated compile and run steps ...
-#   $ nim compile fwatch.nim
-#   $ ./fwatch[.exe]
+#   $ nim compile fswatch.nim
+#   $ ./fswatch[.exe]
 #
 #   ## In one step ...
-#   $ nim compile [--out:fwatch.exe] --run fwatch.nim
+#   $ nim compile [--out:fswatch.exe] --run fswatch.nim
 #
 #   ## Optimal-Compile ...
-#   $ nim compile -d:release --opt:size fwatch.nim
-#   $ strip --strip-all fwatch  #OPTIONAL/TOTEST
-#   $ upx --best fwatch
-#   $ ldd fwatch                # Nur zur Info
-#   $ -> sizeof(normal/upx+strip) = 49kB / 18kB
+#   $ nim compile -d:release --opt:size fswatch.nim
+#   $ strip --strip-all fswatch  #OPTIONAL/TOTEST
+#   $ upx --best fswatch
+#   $ ldd fswatch                # Nur zur Info
+#   $ -> sizeof(normal/upx+strip) = 200kB / 50kB
 #
 #   ## Execute ...
-#   $ fwatch --verbose --watch:src/ exec echo nim compile src/fwatch.nim
-#   $ fwatch --verbose --watch:src/ init echo nim compile src/fwatch.nim
+#   $ fswatch --verbose --watch:src/ exec echo nim compile src/fswatch.nim
+#   $ fswatch --verbose --watch:src/ init echo nim compile src/fswatch.nim
 
 
 {.deadCodeElim: on.}
 
+import ./file_watcher
+import ./utils/file_stat
 
-import os
 import parseopt
 import strutils
 import sequtils
 import tables
 import json
+import os
 from posix import SIGINT, SIGTERM, onSignal
 
-import fwatchpkg/utils/file_stat
-import fwatchpkg/utils/result
 
 
 ## Helfer um Terminal farbig zu gestallten.
@@ -117,10 +117,10 @@ proc initWithDefaultConfigFiles*(
     self: FsWatcherCommand,
 ): FsWatcherCommand {.discardable.} =
     ## Initializes the Command with the default config files, if existing, which are evaluated in following order:
-    ## 1. $APPDIR/.highlight.json
+    ## 1. $APPDIR/.fswatch.json
     let appFilename = os.getAppFilename().lastPathPart()
     let configFilepaths = @[
-        # $APPDIR/.fwatch.json
+        # $APPDIR/.fswatch.json
         os.splitFile(os.getAppFilename()).dir & os.DirSep & "." & appFilename & ".json",
       ].deduplicate()
     for configFilepath in configFilepaths:
@@ -136,7 +136,7 @@ proc initWithCliArgs*(
   ): FsWatcherCommand {.discardable.} =
     ## Initializes the Command from the given CLI-Args.
     var optParser = initOptParser(args)
-    # Parse fwatch-Options/Args ...
+    # Parse fswatch-Options/Args ...
     while true:
         optParser.next()
         case optParser.kind:
@@ -232,22 +232,22 @@ proc doShowHelp(self: FsWatcherCommand): OsReturnCode =
     echo "Example - Get Version:"
     echo "  $ " & appName & " version"
     echo ""
-    echo "Example - initialize .fwatch.conf:"
-    echo "  $ " & appName & " init"
-    echo "  $ " & appName & " --watch:my_file.txt init echo 'file changed: {}"
-    echo ""
     echo "Example - execute command when watched file / dir changed"
-    echo "  $ " & appName & " --watch:my_file.txt exec echo 'File changed: {}'"
+    echo "  $ " & appName & " --watch:src --watch:test exec echo 'File changed: {}'"
     echo ""
-    echo "Example - initialize .fwatch.conf with a command for easy execution:"
-    echo "  $ " & appName & " --watch:my_file.txt init echo 'File changed: {}'"
+    echo "Example - initialize .fswatch.conf:"
+    echo "  $ " & appName & " --watch:src init echo 'file changed: {}"
+    echo "  $ " & appName & " exec"
+    echo ""
+    echo "Example - initialize .fswatch.conf with a command for easy execution:"
+    echo "  $ " & appName & " --watch:src init echo 'File changed: {}'"
     echo "  $ " & appName & " exec"
     return 0
 
 
 
 proc doInitProject(self: FsWatcherCommand): OsReturnCode =
-    ## Schreibt eine fwatch-Konfigurations-Datei in das aktuelle Verzeichnis, welches dann
+    ## Schreibt eine fswatch-Konfigurations-Datei in das aktuelle Verzeichnis, welches dann
     ## bei nachfolgenden Initialisierungen durch newFsWatcherCommand mit importiert wird.
     let configFilename = self.configFilename
     echo "[INFO] erstelle " & configFilename
@@ -267,20 +267,16 @@ proc doInitProject(self: FsWatcherCommand): OsReturnCode =
 
 
 
-#import fwatchpkg/inotify
-import fwatchpkg/file_watcher
-
 
 proc doRun(self: FsWatcherCommand): OsReturnCode  =
     echo "[INFO] Führe Kommando aus bei Änderungen an Dateien ..."
     echo "[INFO]   Dateien:  " & self.watchFiles.join(" ")
     echo "[INFO]   Kommando: " & self.remainingArgs.join(" ")
 
-
     let fileWatcher: FileWatcher = (
         FileWatcher
         .new()
-        .setVerbose(false)
+        .setVerbose(self.isVerbose)
         .addFilepaths(self.watchFiles, isRecursive=true)
     )
     defer:
@@ -316,7 +312,7 @@ proc doRun(self: FsWatcherCommand): OsReturnCode  =
 
 
 
-proc doExecute(self: FsWatcherCommand): OsReturnCode =
+proc doExecute*(self: FsWatcherCommand): OsReturnCode =
     ## Führt das FsWatcherCommand entsprechend seiner Konfiguration aus.
     echo "[INFO] Execute FsWatcher"
 
@@ -333,17 +329,5 @@ proc doExecute(self: FsWatcherCommand): OsReturnCode =
         return self.doRun()
 
     else:
-        echo "[WARN]".yellow & " TODO: " & self.commandType
+        echo "[WARN]".yellow & " unknown command: " & self.commandType
         return 1
-
-
-proc main() =
-    let fwatchCommand = (
-        newFsWatcherCommand()
-        .initWithDefaultConfigFiles()
-        .initWithCliArgs()
-    )
-    let returnCode = fwatchCommand.doExecute()
-    quit(returnCode)
-
-main()

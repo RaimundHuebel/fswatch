@@ -4,7 +4,7 @@
 # see: /usr/include/x86_64-linux-gnu/sys/inotify.h
 
 
-import ./inotify
+import ./utils/inotify
 import ./utils/file_stat
 import ./utils/result
 import strutils
@@ -270,10 +270,13 @@ proc run*(
             isOmitEvent = isOmitEvent and changeEvent.eventType == lastChangeEvent.eventType
             isOmitEvent = isOmitEvent and (changeEvent.timestamp - lastChangeEvent.timestamp) <= initDuration(milliseconds=100)
 
+
             # Eventhandler aufrufen ...
             if not isOmitEvent:
                 lastChangeEvent = changeEvent
                 changeHandler(changeEvent)
+                # Sicherstellen, dass nach der Ausführung, nicht direkt ein 2tes mal gefeuert wird.
+                lastChangeEvent.timestamp = times.getTime()
 
         except:
             echo "[WARN]" & "    An Error happened during reading the InotifyEvent"
