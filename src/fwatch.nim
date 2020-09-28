@@ -267,74 +267,8 @@ proc doInitProject(self: FsWatcherCommand): OsReturnCode =
 
 
 
-
-###
-# Inotify-API
-# siehe: https://github.com/zah/grip-lang/blob/master/lib/posix/inotify.nim
-# siehe: /usr/include/x86_64-linux-gnu/sys/inotify.h
-###
-
-type InotifyFileDescriptor  = cint
-type InotifyWatchDescriptor = cint
-type ErrorCode              = cint
-
-type InotifyEvent* {.
-  pure, final, importc: "struct inotify_event", header: "<sys/inotify.h>"
-.} = object
-    wd*:     InotifyWatchDescriptor  # Watch descriptor.
-    mask*:   uint32                  # Watch mask.
-    cookie*: uint32                  # Cookie to synchronize two events.
-    len*:    uint32                  # Length (including NULs) of name.
-    name*:   cstring                 # Name.
-
-#const IN_ACCESS*:     uint32 = 0x00000001  # File was accessed.
-const IN_MODIFY*:      uint32 = 0x00000002  # File was modified.
-const IN_ATTRIB*:      uint32 = 0x00000004  # Metadata changed.
-#const IN_CLOSE*:      uint32 = 0x00000018  # File got closed.
-#const IN_OPEN*:       uint32 = 0x00000020  # File got opened.
-const IN_MOVE*:        uint32 = 0x000000C0  # File was moved.
-const IN_CREATE*:      uint32 = 0x00000100  # Subfile was created.
-const IN_DELETE*:      uint32 = 0x00000200  # Subfile was deleted.
-const IN_DELETE_SELF*: uint32 = 0x00000400  # Self was deleted.
-const IN_MOVE_SELF*:   uint32 = 0x00000800  # Self was moved.
-
-const IN_UMOUNT*:      uint32 = 0x00002000  # Backing fs was unmounted
-const IN_ONLYDIR*:     uint32 = 0x01000000  # Only watch the path if it is a directory.
-const IN_DONT_FOLLOW*: uint32 = 0x02000000  # Do not follow a sym link.
-const IN_ISDIR*:       uint32 = 0x40000000  # Event occurred against dir.
-
-
-## Create an Inotify instance and returns an InotifyFileDescriptor
-proc InotifyInit1*(
-  ): InotifyFileDescriptor {. cdecl, importc: "inotify_init", header: "<sys/inotify.h>" .}
-
-## Closes the InotifyFileDescriptor
-proc InotifyClose*(
-    fd: InotifyFileDescriptor
-  ): ErrorCode {. cdecl, importc: "close", header: "<unistd.h>" .}
-
-## Reads from an InotifyFileDescriptor
-type cssize* {. importc: "ssize_t", header: "<unistd.h>" .} = uint
-proc InotifyRead*(
-    fd: InotifyFileDescriptor,
-    buf: pointer,
-    count: csize
-  ): cssize {. cdecl, importc: "read", header: "<unistd.h>" .}
-
-
-## Add watch of object NAME to inotify instance FD.
-## Notify about events specified by MASK.
-proc InotifyAddWatch*(
-    fd: InotifyFileDescriptor, name: cstring, mask: uint32
-  ): InotifyWatchDescriptor {. cdecl, importc: "inotify_add_watch", header: "<sys/inotify.h>" .}
-
-## Remove the watch specified by WD from the inotify instance FD.
-proc InotifyRmWatch*(
-    fd: InotifyFileDescriptor,
-    wd: InotifyWatchDescriptor
-  ): ErrorCode {. cdecl, importc: "inotify_rm_watch", header: "<sys/inotify.h>".}
-
-
+#import fwatchpkg/inotify
+import fwatchpkg/file_watcher
 
 
 proc doRun(self: FsWatcherCommand): OsReturnCode  =
@@ -342,221 +276,38 @@ proc doRun(self: FsWatcherCommand): OsReturnCode  =
     echo "[INFO]   Dateien:  " & self.watchFiles.join(" ")
     echo "[INFO]   Kommando: " & self.remainingArgs.join(" ")
 
-    block:
-        echo "[INFO] Prüfe ob Dateien für die Überwachung vorhanden sind ..."
-        if self.watchFiles.len == 0:
-            echo "[FAIL] ".error & "    Keine Dateien für die Überwachung vorhanden"
-            return 1
-        echo "[OK  ]".green & "    Dateien sind vorhanden"
 
-        echo "[INFO] Erstelle Inotify-Instanz ..."
-        let inotifyFd = InotifyInit1()
-        if inotifyFd < 0:
-            echo "[FAIL]".error & "    Inotify-Instanz konnte nicht erstellt werden (fd: " & $inotifyFd & ")"
-            return 1
-        echo "[OK  ]".green & "    Inotify-Instanz erstellt (fd: " & $inotifyFd & ")"
+    let fileWatcher: FileWatcher = (
+        FileWatcher
+        .new()
+        .setVerbose(false)
+        .addFilepaths(self.watchFiles, isRecursive=true)
+    )
+    defer:
+        fileWatcher.dispose()
 
-        defer:
-            echo "[INFO] Schließe Inotify-Instanz ..."
-            if InotifyClose(inotifyFd) == 0:
-                echo "[OK  ]".green & "    Inotify-Instanz wurde erfolgreich geschlossen"
-            else:
-                echo "[FAIL]".error & "    Inotify-Instanz konnte nicht geschlossen werden"
+    onSignal(SIGINT):
+        echo "bye from signal: ", sig
+        #fileWatcher.stop()
+        raise newException(Exception, "Quit the Loop")
 
-        echo "[INFO] Erstelle InotifyWatches für Dateien (errno: " & $osLastError() & ") ..."
-        #var inotifyWds = newSeq[InotifyWatchDescriptor]()
-        var inotifyWd2WatchFileMap = initOrderedTable[InotifyWatchDescriptor, string]()
-        var watchFiles: seq[string] = self.watchFiles.deduplicate()
-        var watchFileIdx: int = 0
-
-        var watchMask: uint32 = 0
-        watchMask = IN_MODIFY or IN_ATTRIB or IN_MOVE or IN_CREATE or IN_DELETE
-        watchMask = watchMask or IN_DELETE_SELF or IN_MOVE_SELF   # Self Move/Delete verfolgen
-        watchMask = watchMask or IN_DONT_FOLLOW                   # Symlinks nicht verfolgen
-        #watchMask = watchMask or IN_ACCESS                       # Allgemeiner Zugriff kommt zu häufig vor
-
-        #for watchFile in watchFiles:
-        #for watchFileIdx in 0..watchFiles.high:
-        while watchFileIdx < watchFiles.len:
-            let watchFile: string = watchFiles[watchFileIdx]
-            watchFileIdx += 1
-            echo "[INFO]    Ermittle FileStat für '" & watchFile & "."
-            let statResult = file_stat.newFileStat2(watchFile)
-            if statResult.isError:
-                echo "[WARN]".warn & "    Konnte FileStat für '" & watchFile & "' nicht ermitteln (error: '" & $statResult.errValue & "')"
-                continue
-            let watchFileStat: FileStat = statResult.unwrap()
-
-            # Erstmal nur Dateien und Verzeichnisse unterstützen ...
-            if not (watchFileStat.isFile or watchFileStat.isDirectory):
-                echo "[WARN]".warn & "    Dateityp nicht unterstützt für '" & watchFile & " -> ignorieren"
-                continue
-
-            echo "[INFO]    Erstelle InotifyWatch für: " & watchFile
-            let watchDescriptor = inotifyFd.InotifyAddWatch(
-                name = watchFile,
-                mask = watchMask
+    fileWatcher.run do (changeEvent: FileChangeEvent):
+        #echo changeEvent.eventType, " (", changeEvent.fileType, ") ", ": ", changeEvent.filepath
+        # Execute given command when File has changed ...
+        let command: string = (
+            self
+            .remainingArgs
+            .map( proc (arg: string): string =
+                arg.replace("{}", changeEvent.filepath)
             )
-            if watchDescriptor < 0:
-                echo "[WARN]".warn & "    InotifyWatch konnte nicht für '" & watchFile & "' erstellt werden (errno: " & $osLastError() & ")"
-                continue
-            echo "[OK  ]".ok & "    InotifyWatch für '" & watchFile & "' erstellt (wd: " & $watchDescriptor & ")"
-            inotifyWd2WatchFileMap[watchDescriptor] = watchFile
-
-            # Unterverzeichnisse hinzufügen wenn es sich um ein Verzeichnis handelt ...
-            if watchFileStat.isDirectory:
-                echo "[INFO]    '" & watchFile & "' ist ein Verzeichnis -> installiere überwachung"
-
-                for subKind, subPath in os.walkDir( dir = watchFile, relative = true ):
-                    if subKind != os.PathComponent.pcDir:
-                        continue
-                    let additionalWatchDir = os.joinPath(watchFile, subPath)
-                    echo "[INFO]    - " & additionalWatchDir & " : " & $subKind
-                    watchFiles.add( additionalWatchDir )
-
-        defer:
-            echo "[INFO] Schließe alle offenen InotifyWatches ..."
-            for watchDescriptor, watchFile in inotifyWd2WatchFileMap:
-                echo "[INFO]    schließe WatchDescriptor für '" & watchFile & "' (wd: " & $watchDescriptor & ")"
-                if inotifyFd.InotifyRmWatch(watchDescriptor) < 0:
-                    echo "[WARN]".warn & "    WatchDescriptor konnte nicht geschlossen werden (errno: " & $osLastError() & ")"
-                else:
-                    echo "[OK  ]".ok & "    WatchDescriptor geschlossen"
-            inotifyWd2WatchFileMap.clear()
-
-        echo "[INFO] Initialisiere InotifyEvent-Pointer ..."
-        let inotifyEventSize: int = InotifyEvent.sizeof() + 1000 + 1
-        echo "[INFO]    sizeof(inotifyEvent): " & $inotifyEventSize & " bytes"
-        let inotifyEventPtr: ptr InotifyEvent = cast[ptr InotifyEvent](alloc(inotifyEventSize))
-        defer:
-            echo "[INFO] Gebe InotifyEvent-Pointer frei ..."
-            dealloc( inotifyEventPtr )
-        echo "[INFO]    inotifyEventPtr.Addr: 0x" & $cast[uint](inotifyEventPtr).toHex()
-
-        echo "[INFO] Verarbeite File-Change-Events ..."
-        onSignal(SIGINT):
-            echo "bye from signal: ", sig
-            raise newException(Exception, "Quit the Loop")
-        while true:
-            try:
-                echo ""
-                echo "[INFO] Warte auf Inotify-Event ..."
-
-                zeroMem(inotifyEventPtr, inotifyEventSize)
-                let inotifyEventReadSize: cssize = inotifyFd.InotifyRead(buf = inotifyEventPtr, count = inotifyEventSize)
-                if inotifyEventReadSize < 0:
-                    echo "[WARN]".warn & "    Inotify-Event konnte nicht gelesen werden (errno: " & $osLastError() & ")"
-                    break
-                echo "[OK  ]".ok & "  Inotify-Event gelesen ..."
-                echo "        readed: " & $inotifyEventReadSize & " bytes"
-                echo "        wd:     " & $inotifyEventPtr.wd
-                echo "        mask:   0x" & $inotifyEventPtr.mask.toHex()
-                echo "        cookie: 0x" & $inotifyEventPtr.cookie.toHex()
-                echo "        len:    " & $inotifyEventPtr.len & " chars"
-                echo "        name:   '" & $inotifyEventPtr.name & "'"
-
-                if not inotifyWd2WatchFileMap.contains(inotifyEventPtr.wd):
-                    echo "[WARN]".warn & "    WatchDescriptor -> Filename eintrag nicht gefunden für wd: " & $inotifyEventPtr.wd
-                    continue
-
-                let changedFilename: string =
-                    if inotifyEventPtr.len > 0'u32:
-                        inotifyWd2WatchFileMap[ inotifyEventPtr.wd ].joinPath( $inotifyEventPtr.name )
-                    else:
-                        inotifyWd2WatchFileMap[ inotifyEventPtr.wd ]
-
-                var handled = false
-                # Kommt zu häufig vor ...
-                #if (inotifyEventPtr.mask and IN_ACCESS) != 0:
-                #    echo "[INFO]".green, " file '" & changedFilename & "' was accessed"
-                #    handled = true
-                if (inotifyEventPtr.mask and IN_ISDIR) == 0:
-                    echo "[INFO]".green, " fs entry '" & changedFilename & "' is a file"
-
-
-                if (inotifyEventPtr.mask and IN_ISDIR) != 0:
-                    echo "[INFO]".green, " fs entry '" & changedFilename & "' is a directory"
-
-
-                if (inotifyEventPtr.mask and IN_MODIFY) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' was modified"
-                    handled = true
-
-
-                if (inotifyEventPtr.mask and IN_ATTRIB) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' attribs changed"
-                    handled = true
-
-
-                if (inotifyEventPtr.mask and (IN_MODIFY or IN_ATTRIB)) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' was modified -> Execute"
-                    handled = true
-                    # Execute given command when File has changed ...
-                    let command: string = (
-                        self
-                        .remainingArgs
-                        .map( proc (arg: string): string =
-                            arg.replace("{}", changedFilename)
-                        )
-                        .join(" ")
-                    )
-                    echo "[EXEC] ".warn, command
-                    let returnCode: int = os.execShellCmd( command )
-                    if returnCode == 0:
-                        echo "[OK  ]".ok   & " the process finished with returncode: " & $returnCode
-                    else:
-                        echo "[WARN]".warn & " the process finished with returncode: " & $returnCode
-
-
-
-                if (inotifyEventPtr.mask and IN_CREATE) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' was created"
-                    handled = true
-                    # Add InotifyWatch if a Directory was created ...
-                    if (inotifyEventPtr.mask and IN_ISDIR) != 0:
-                        echo "[INFO]    Erstelle InotifyWatch für: " & changedFilename
-                        let watchDescriptor = inotifyFd.InotifyAddWatch(
-                            name = changedFilename,
-                            mask = watchMask
-                        )
-                        if watchDescriptor >= 0:
-                            echo "[OK  ]".ok & "    InotifyWatch für '" & changedFilename & "' erstellt (wd: " & $watchDescriptor & ")"
-                            inotifyWd2WatchFileMap[watchDescriptor] = changedFilename
-                        else:
-                            echo "[WARN]".warn & "    InotifyWatch konnte nicht für '" & changedFilename & "' erstellt werden (errno: " & $osLastError() & ")"
-
-
-                if (inotifyEventPtr.mask and IN_DELETE) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' was deleted"
-                    handled = true
-                    # Remove InotifyWatch if a Directory was deleted or a direct delete has occurred ...
-                    var isRemoveWatch = false
-                    isRemoveWatch = isRemoveWatch or (inotifyEventPtr.mask and IN_ISDIR) != 0
-                    isRemoveWatch = isRemoveWatch or (inotifyEventPtr.len  == 0)
-                    isRemoveWatch = isRemoveWatch or (inotifyEventPtr.name == "")
-                    isRemoveWatch = isRemoveWatch and (inotifyEventPtr.wd > 0)
-                    isRemoveWatch = isRemoveWatch and (inotifyWd2WatchFileMap.contains(inotifyEventPtr.wd))
-                    if isRemoveWatch:
-                        echo "[INFO] Schließe offenen InotifyWatch für '" & changedFilename & "'..."
-                        if inotifyFd.InotifyRmWatch(inotifyEventPtr.wd) < 0:
-                            echo "[WARN]".warn & "    WatchDescriptor konnte nicht geschlossen werden (errno: " & $osLastError() & ")"
-                        else:
-                            echo "[OK  ]".ok & "    WatchDescriptor geschlossen"
-                        inotifyWd2WatchFileMap.del(inotifyEventPtr.wd)
-
-                if (inotifyEventPtr.mask and IN_UMOUNT) != 0:
-                    echo "[INFO]".green, " file '" & changedFilename & "' was unmounted"
-                    handled = true
-                    # TODO Remove InotifyWatch if a Directory was unmounted
-                    # TODO siehe oben: Remove InotifyWatch if a Directory was deleted or a direct delete has occurred
-
-                if not handled:
-                    echo "[INFO]".green, " something happened with '" & changedFilename & "'"
-
-            except:
-                echo "[WARN]".warn & "    An Error happened during reading the InotifyEvent"
-                echo "[WARN]".warn & "    -> " & system.getCurrentExceptionMsg()
-                break
+            .join(" ")
+        )
+        echo "[EXEC] ".warn, command
+        let returnCode: int = os.execShellCmd( command )
+        if returnCode == 0:
+            echo "[OK  ]".ok   & " the process finished with returncode: " & $returnCode
+        else:
+            echo "[WARN]".warn & " the process finished with returncode: " & $returnCode
 
     echo "[OK  ]".green & " Kommando ausgeführt"
     return 0
