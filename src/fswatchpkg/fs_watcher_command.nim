@@ -51,6 +51,13 @@ proc yellow*(str: string): string =
 proc red*(str: string): string =
     "\x1b[0;31m" & str &  "\x1b[0m"
 
+proc clearConsole*() =
+    echo "\x1b[2J\x1b[1;1H"
+
+proc resetConsole*() =
+    echo "\x1b[2J\x1b[1;1H"
+
+
 proc ok*(str: string):    string {.inline.} = str.green
 proc warn*(str: string):  string {.inline.} = str.yellow
 proc error*(str: string): string {.inline.} = str.red
@@ -75,9 +82,9 @@ type FsWatcherCommand* = ref object
     configErrors:   seq[string]
 
 
-proc configFilename*(self: FsWatcherCommand): string =
+proc appConfigFilename*(self: FsWatcherCommand): string =
     let appName = os.getAppFilename().lastPathPart()
-    let configFilename = "." & appName & ".conf"
+    let configFilename = "." & appName & ".json"
     return configFileName
 
 
@@ -106,10 +113,14 @@ proc initWithConfigFile*(
         return self
     let jsonConf = json.parseFile(configFilepath)
     proc toString(x: JsonNode): string = x.getStr()
-    self.isVerbose      = jsonConf["isVerbose"     ].getBool(false)
-    self.isClearConsole = jsonConf["isClearConsole"].getBool(false)
-    self.watchFiles     = jsonConf["watchFiles"    ].getElems().map(toString)
-    self.remainingArgs  = jsonConf["command"       ].getElems().map(toString)
+    if jsonConf.hasKey("isVerbose"):
+        self.isVerbose = jsonConf["isVerbose"].getBool(false)
+    if jsonConf.hasKey("isClearConsole"):
+        self.isClearConsole = jsonConf["isClearConsole"].getBool(false)
+    if jsonConf.hasKey("watchFiles"):
+        self.watchFiles = jsonConf["watchFiles"].getElems().map(toString)
+    if jsonConf.hasKey("command"):
+        self.remainingArgs = jsonConf["command"].getElems().map(toString)
     return self
 
 
@@ -118,10 +129,10 @@ proc initWithDefaultConfigFiles*(
 ): FsWatcherCommand {.discardable.} =
     ## Initializes the Command with the default config files, if existing, which are evaluated in following order:
     ## 1. $APPDIR/.fswatch.json
-    let appFilename = os.getAppFilename().lastPathPart()
+    let appConfigFilename = self.appConfigFilename()
     let configFilepaths = @[
         # $APPDIR/.fswatch.json
-        os.splitFile(os.getAppFilename()).dir & os.DirSep & "." & appFilename & ".json",
+        os.splitFile(os.getAppFilename()).dir & os.DirSep & appConfigFilename,
       ].deduplicate()
     for configFilepath in configFilepaths:
         if os.existsFile(configFilepath):
@@ -235,13 +246,10 @@ proc doShowHelp(self: FsWatcherCommand): OsReturnCode =
     echo "Example - execute command when watched file / dir changed"
     echo "  $ " & appName & " --watch:src --watch:test exec echo 'File changed: {}'"
     echo ""
-    echo "Example - initialize .fswatch.conf:"
+    echo "Example - initialize .fswatch.conf with a command for easy execution:"
     echo "  $ " & appName & " --watch:src init echo 'file changed: {}"
     echo "  $ " & appName & " exec"
-    echo ""
-    echo "Example - initialize .fswatch.conf with a command for easy execution:"
-    echo "  $ " & appName & " --watch:src init echo 'File changed: {}'"
-    echo "  $ " & appName & " exec"
+    echo "  $ " & appName & " exec echo 'override commando {}'"
     return 0
 
 
@@ -249,7 +257,7 @@ proc doShowHelp(self: FsWatcherCommand): OsReturnCode =
 proc doInitProject(self: FsWatcherCommand): OsReturnCode =
     ## Schreibt eine fswatch-Konfigurations-Datei in das aktuelle Verzeichnis, welches dann
     ## bei nachfolgenden Initialisierungen durch newFsWatcherCommand mit importiert wird.
-    let configFilename = self.configFilename
+    let configFilename = self.appConfigFilename()
     echo "[INFO] erstelle " & configFilename
     let jsonObj: JsonNode = %* {
         "isVerbose": self.isVerbose,
@@ -270,8 +278,12 @@ proc doInitProject(self: FsWatcherCommand): OsReturnCode =
 
 proc doRun(self: FsWatcherCommand): OsReturnCode  =
     echo "[INFO] Führe Kommando aus bei Änderungen an Dateien ..."
-    echo "[INFO]   Dateien:  " & self.watchFiles.join(" ")
+    echo "[INFO]   Verzeichnisse/Dateien: " & self.watchFiles.join(" ")
     echo "[INFO]   Kommando: " & self.remainingArgs.join(" ")
+
+    if self.remainingArgs.len == 0:
+        echo "[FAIL]".red & " Kein Kommando für die Ausführung definiert."
+        return 0
 
     let fileWatcher: FileWatcher = (
         FileWatcher
@@ -298,6 +310,8 @@ proc doRun(self: FsWatcherCommand): OsReturnCode  =
             )
             .join(" ")
         )
+        if self.isClearConsole:
+            resetConsole()
         echo "[EXEC] ".warn, command
         let returnCode: int = os.execShellCmd( command )
         if returnCode == 0:

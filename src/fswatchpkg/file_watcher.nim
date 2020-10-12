@@ -193,7 +193,7 @@ proc run*(
         raise newException(Exception, "param changeHandler must not be null")
 
     # InotifyEventptr erstellen, und später aufräumen ...
-    let inotifyEventSize: int = InotifyEvent.sizeof() + 1000 + 1
+    let inotifyEventSize: int = InotifyEvent.sizeof() * 256  # == 4kb
     let inotifyEventPtr: ptr InotifyEvent = cast[ptr InotifyEvent](alloc(inotifyEventSize))
     defer:
         if self.isVerbose:
@@ -212,71 +212,86 @@ proc run*(
 
             # Warte auf Inotify-Event
             zeroMem(inotifyEventPtr, inotifyEventSize)
-            let inotifyEventReadSize: cssize = self.inotifyFd.InotifyRead(buf = inotifyEventPtr, count = inotifyEventSize)
+            let inotifyEventReadSize: cssize_t = self.inotifyFd.InotifyRead(buf = inotifyEventPtr, count = inotifyEventSize.csize_t)
             if inotifyEventReadSize < 0:
                 echo "[WARN]" & "    Inotify-Event konnte nicht gelesen werden (errno: " & $osLastError() & ")"
                 break
+
             if self.isVerbose:
-                echo "[OK  ]" & "  Inotify-Event gelesen ..."
+                echo "[OK  ]" & "  Inotify-Events gelesen ..."
                 echo "        readed: " & $inotifyEventReadSize & " bytes"
-                echo "        wd:     " & $inotifyEventPtr.wd
-                echo "        mask:   0x" & $inotifyEventPtr.mask.toHex()
-                echo "        cookie: 0x" & $inotifyEventPtr.cookie.toHex()
-                echo "        len:    " & $inotifyEventPtr.len & " chars"
-                echo "        name:   '" & $inotifyEventPtr.name & "'"
+               #echo "    sizeof: " & $sizeof(InotifyEvent) & " bytes"
 
-            if not self.inotifyWd2WatchFileMap.contains(inotifyEventPtr.wd):
-                echo "[WARN]" & "    WatchDescriptor -> Filename eintrag nicht gefunden für wd: " & $inotifyEventPtr.wd
-                continue
+            ## Inotify fasst evtl. mehrere Changes zusammen, diese müssen Iteriert werden ...
+            var currIdx    = 0
+            var currOffset = 0
 
-            # Event zusammenstellen ...
-            let changeEvent = FileChangeEvent()
+            while currOffset < inotifyEventReadSize:
+                let currInotifyEventPtr = cast[ptr InotifyEvent](cast[int](inotifyEventPtr) + currOffset)
 
-            changeEvent.timestamp = times.getTime()
+                if self.isVerbose:
+                    echo "   Item: ", currIdx
+                    echo "        offset: " & $currOffset
+                    echo "        wd:     " & $currInotifyEventPtr.wd
+                    echo "        mask:   0x" & $currInotifyEventPtr.mask.toHex()
+                    echo "        cookie: 0x" & $currInotifyEventPtr.cookie.toHex()
+                    echo "        len:    " & $currInotifyEventPtr.len & " chars"
+                    echo "        name:   '" & $currInotifyEventPtr.name & "'"
 
-            changeEvent.filepath =
-                if inotifyEventPtr.len > 0'u32:
-                    self.inotifyWd2WatchFileMap[ inotifyEventPtr.wd ].joinPath( $inotifyEventPtr.name )
+                currIdx    = currIdx + 1
+                currOffset = currOffset + sizeof(InotifyEvent) + currInotifyEventPtr.len.int
+
+                if not self.inotifyWd2WatchFileMap.contains(currInotifyEventPtr.wd):
+                    #echo "[WARN]" & "    WatchDescriptor -> Filename eintrag nicht gefunden für wd: " & $currInotifyEventPtr.wd
+                    continue
+
+                # Event zusammenstellen ...
+                let changeEvent = FileChangeEvent()
+
+                changeEvent.timestamp = times.getTime()
+
+                changeEvent.filepath =
+                    if currInotifyEventPtr.len > 0'u32:
+                        self.inotifyWd2WatchFileMap[ currInotifyEventPtr.wd ].joinPath( $currInotifyEventPtr.name )
+                    else:
+                        self.inotifyWd2WatchFileMap[ currInotifyEventPtr.wd ]
+
+                if (currInotifyEventPtr.mask and IN_ISDIR) != 0:
+                    changeEvent.fileType = "dir"
                 else:
-                    self.inotifyWd2WatchFileMap[ inotifyEventPtr.wd ]
+                    changeEvent.fileType = "file"
 
-            if (inotifyEventPtr.mask and IN_ISDIR) != 0:
-                changeEvent.fileType = "dir"
-            else:
-                changeEvent.fileType = "file"
+                if (currInotifyEventPtr.mask and IN_CREATE) != 0:
+                    changeEvent.eventType = "created"
+                elif (currInotifyEventPtr.mask and IN_DELETE) != 0:
+                    changeEvent.eventType = "deleted"
+                elif (currInotifyEventPtr.mask and IN_MODIFY) != 0:
+                    changeEvent.eventType = "changed"
+                elif (currInotifyEventPtr.mask and IN_ATTRIB) != 0:
+                    changeEvent.eventType = "changed:attribs"
 
-            if (inotifyEventPtr.mask and IN_CREATE) != 0:
-                changeEvent.eventType = "created"
-            elif (inotifyEventPtr.mask and IN_DELETE) != 0:
-                changeEvent.eventType = "deleted"
-            elif (inotifyEventPtr.mask and IN_MODIFY) != 0:
-                changeEvent.eventType = "changed"
-            elif (inotifyEventPtr.mask and IN_ATTRIB) != 0:
-                changeEvent.eventType = "changed:attribs"
+                # Wenn ein Verzeichnis erstellt wurde, dieses hinzufügen ...
+                if changeEvent.fileType == "dir" and changeEvent.eventType == "created":
+                    self.addFilepath(changeEvent.filepath)
 
-            # Wenn ein Verzeichnis erstellt wurde, dieses hinzufügen ...
-            if changeEvent.fileType == "dir" and changeEvent.eventType == "created":
-                self.addFilepath(changeEvent.filepath)
+                # Wenn ein Verzeichnis gelöscht wurde, dieses entfernen (inkl. Unterelemente) ...
+                if changeEvent.fileType == "dir" and changeEvent.eventType == "deleted":
+                    self.removeFilepath(changeEvent.filepath)
 
-            # Wenn ein Verzeichnis gelöscht wurde, dieses entfernen (inkl. Unterelemente) ...
-            if changeEvent.fileType == "dir" and changeEvent.eventType == "deleted":
-                self.removeFilepath(changeEvent.filepath)
+                # Ermitteln ob das changeEvent nach außen getriggert werden soll (debounce check) ...
+                var isOmitEvent = true
+                isOmitEvent = isOmitEvent and lastChangeEvent != nil
+                isOmitEvent = isOmitEvent and changeEvent.filepath  == lastChangeEvent.filepath
+                isOmitEvent = isOmitEvent and changeEvent.fileType  == lastChangeEvent.fileType
+                isOmitEvent = isOmitEvent and changeEvent.eventType == lastChangeEvent.eventType
+                isOmitEvent = isOmitEvent and (changeEvent.timestamp - lastChangeEvent.timestamp) <= initDuration(milliseconds=100)
 
-            # Ermitteln ob das changeEvent nach außen getriggert werden soll (debounce check) ...
-            var isOmitEvent = true
-            isOmitEvent = isOmitEvent and lastChangeEvent != nil
-            isOmitEvent = isOmitEvent and changeEvent.filepath  == lastChangeEvent.filepath
-            isOmitEvent = isOmitEvent and changeEvent.fileType  == lastChangeEvent.fileType
-            isOmitEvent = isOmitEvent and changeEvent.eventType == lastChangeEvent.eventType
-            isOmitEvent = isOmitEvent and (changeEvent.timestamp - lastChangeEvent.timestamp) <= initDuration(milliseconds=100)
-
-
-            # Eventhandler aufrufen ...
-            if not isOmitEvent:
-                lastChangeEvent = changeEvent
-                changeHandler(changeEvent)
-                # Sicherstellen, dass nach der Ausführung, nicht direkt ein 2tes mal gefeuert wird.
-                lastChangeEvent.timestamp = times.getTime()
+                # Eventhandler aufrufen ...
+                if not isOmitEvent:
+                    lastChangeEvent = changeEvent
+                    changeHandler(changeEvent)
+                    # Sicherstellen, dass nach der Ausführung, nicht direkt ein 2tes mal gefeuert wird.
+                    lastChangeEvent.timestamp = times.getTime()
 
         except:
             echo "[WARN]" & "    An Error happened during reading the InotifyEvent"

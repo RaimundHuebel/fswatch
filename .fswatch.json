@@ -2,11 +2,11 @@
   "isVerbose": false,
   "isClearConsole": false,
   "watchFiles": [
-    "src"
+    "src",
+    ".fswatch.json"
   ],
   "command": [
-    "nimble",
-    "build",
-    "fswatch"
+    "echo",
+    "changed: {}"
   ]
 }

@@ -43,12 +43,12 @@ proc InotifyClose*(
   ): ErrorCode {. cdecl, importc: "close", header: "<unistd.h>" .}
 
 ## Reads from an InotifyFileDescriptor
-type cssize* {. importc: "ssize_t", header: "<unistd.h>" .} = uint
+type cssize_t* {. importc: "ssize_t", nodecl, header: "<unistd.h>" .} = int
 proc InotifyRead*(
     fd: InotifyFileDescriptor,
     buf: pointer,
-    count: csize
-  ): cssize {. cdecl, importc: "read", header: "<unistd.h>" .}
+    count: csize_t
+  ): cssize_t {. cdecl, importc: "read", header: "<unistd.h>" .}
 
 
 ## Add watch of object NAME to inotify instance FD.

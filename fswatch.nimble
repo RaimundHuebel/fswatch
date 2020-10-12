@@ -13,4 +13,4 @@ bin           = @["fswatch"]
 # Dependencies
 
 requires "nim >= 1.2.0"
-#requires "pathname >= 0.1.0"
+requires "pathname >= 0.1.0"
