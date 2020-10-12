@@ -27,15 +27,13 @@
 {.deadCodeElim: on.}
 
 import ./file_watcher
-import ./utils/file_stat
-
 import parseopt
 import strutils
 import sequtils
 import tables
 import json
 import os
-from posix import SIGINT, SIGTERM, onSignal
+from posix import nil
 
 
 
@@ -129,13 +127,17 @@ proc initWithDefaultConfigFiles*(
 ): FsWatcherCommand {.discardable.} =
     ## Initializes the Command with the default config files, if existing, which are evaluated in following order:
     ## 1. $APPDIR/.fswatch.json
+    ## 2. $PWD/.fswatch.json
     let appConfigFilename = self.appConfigFilename()
     let configFilepaths = @[
         # $APPDIR/.fswatch.json
         os.splitFile(os.getAppFilename()).dir & os.DirSep & appConfigFilename,
+        # $PWD/.fswatch.json
+        os.getCurrentDir() & os.DirSep & appConfigFilename,
       ].deduplicate()
     for configFilepath in configFilepaths:
         if os.existsFile(configFilepath):
+            echo configFilePath
             self.initWithConfigFile(configFilepath)
     return self
 
@@ -226,6 +228,7 @@ proc doShowHelp(self: FsWatcherCommand): OsReturnCode =
     ## Gibt die Hilfe zu der Anwendung auf der Console aus.
     echo "[INFO] do show app help"
     let appName = os.getAppFilename().lastPathPart()
+    let appConfigFilename = self.appConfigFilename()
     echo "USAGE:"
     echo "  $ " & appName & " [OPTIONS] [COMMAND_TYPE] [COMMAND_ARGS]"
     echo ""
@@ -250,6 +253,10 @@ proc doShowHelp(self: FsWatcherCommand): OsReturnCode =
     echo "  $ " & appName & " --watch:src init echo 'file changed: {}"
     echo "  $ " & appName & " exec"
     echo "  $ " & appName & " exec echo 'override commando {}'"
+    echo ""
+    echo "Following config files are applied in given order, if existing:"
+    echo "  1. $APPDIR/" & appConfigFilename
+    echo "  2. $PWD/" & appConfigFilename
     return 0
 
 
@@ -294,7 +301,7 @@ proc doRun(self: FsWatcherCommand): OsReturnCode  =
     defer:
         fileWatcher.dispose()
 
-    onSignal(SIGINT):
+    posix.onSignal(posix.SIGINT):
         echo "bye from signal: ", sig
         #fileWatcher.stop()
         raise newException(Exception, "Quit the Loop")

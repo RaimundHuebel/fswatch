@@ -4,9 +4,8 @@
 # see: /usr/include/x86_64-linux-gnu/sys/inotify.h
 
 
-import ./utils/inotify
-import ./utils/file_stat
-import ./utils/result
+import ./private/inotify
+import pathname/file_status
 import strutils
 import tables
 import times
@@ -109,17 +108,16 @@ proc addFilepath*(
     ## auch alle Unterverzeichnisse überwacht.
 
     # FileStat zur watchFile erstellen ...
-    let statResult = file_stat.newFileStat2(watchFile)
-    if statResult.isError:
-        raise newException(Exception, "Konnte FileStat für '" & watchFile & "' nicht ermitteln (error: '" & $statResult.errValue & "')")
-    let watchFileStat: FileStat = statResult.unwrap()
+    let watchFileStatus = FileStatus.fromPathStr(watchFile)
+    if watchFileStatus.isNotExisting():
+        raise newException(Exception, "Datei/Verzeichnis '" & watchFile & "' existiert nicht.")
 
     # Erstmal nur Dateien und Verzeichnisse unterstützen ...
-    if not (watchFileStat.isFile or watchFileStat.isDirectory):
+    if not watchFileStatus.isRegularFile() and not watchFileStatus.isDirectory():
         raise newException(Exception, "Dateityp nicht unterstützt für '" & watchFile & " -> ignorieren")
 
     # Abbruch, wenn Verzeichnis der regulären Datei bereits überwacht ...
-    if watchFileStat.isFile():
+    if watchFileStatus.isRegularFile():
         for watchFd, fileName in self.inotifyWd2WatchFileMap.pairs():
             if os.splitFile(watchFile).dir == os.splitFile(fileName).dir:
                 return
@@ -145,15 +143,15 @@ proc addFilepath*(
     # in Überwachungsliste aufnehmen ...
     self.inotifyWd2WatchFileMap[watchDescriptor] = watchFile
 
-    # Wenn nicht Recursiv, dann ist hier Schluss ...
+    # Wenn nicht recursiv ist, dann ist hier Schluss ...
     if isRecursive == false:
         return self
 
     # Wenn es sich um eine normale Datei handelt, dann ist hier Schluss ...
-    if watchFileStat.isFile():
+    if watchFileStatus.isRegularFile():
         return self
 
-    assert( watchFileStat.isDirectory() )
+    assert( watchFileStatus.isDirectory() )
 
     # Wenn es sich um ein Verzeichnis handelt, und die rekursive Aufnahme erwünscht ist, dann alle
     # Unterverzeichnisse mit aufnehmen ...

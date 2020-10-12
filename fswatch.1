@@ -1,0 +1,32 @@
+.TH fswatch 1 "October 2020" Linux "User Manuals"
+.SH NAME
+fswatch \- executes command when watched files changed.
+.SH SYNOPSIS
+.B fswatch COMMAND OPTIONS
+.SH DESCRIPTION
+.B fswatch
+executes command when files defined by --watch changed
+.B -e
+Options.
+.SH COMMAND/OPTIONS
+.IP -h | --help
+Show Help.
+.IP -v
+Show version of the program.
+.IP --watch=File/Dir
+Adds file/dir to the watch. Multiple definitions are possible.
+This can be provided for command init and exec.
+.IP --verbose
+Activates verbose output, for debugging reasons.
+.IP init
+Initializes a new config file ($PWD/.highlight.json) with the current configuration of the program.
+.IP exec
+Starts file-system watch, which executes given command, when any watched file/dir changed.
+.SH EXAMPLES
+$ fswatch --watch=src --watch=test exec echo "file changed: {}"
+
+$ fswatch --watch=src --watch=test init npm run tests
+
+$ fswatch exec
+.SH AUTHOR
+Raimund Hübel <raimund.huebel@googlemail.com>

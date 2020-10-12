@@ -16,8 +16,12 @@
 #   $ nim compile -d:release --opt:size fswatch.nim
 #   $ strip --strip-all fswatch  #OPTIONAL/TOTEST
 #   $ upx --best fswatch
-#   $ ldd fswatch                # Nur zur Info
-#   $ -> sizeof(normal/upx+strip) = 49kB / 18kB
+#   $ ldd fswatch                 # Nur zur Info
+#
+#   # Build-Variants        size  speed  debug
+#   # sizeof(normal)     : 191kb  270kB  444kb
+#   # sizeof(+ strip-all): 135kb  223kb  375kb
+#   # sizeof(+ upx)      :  58kb   93kb  109kb
 #
 #   ## Execute ...
 #   $ fswatch --verbose --watch:src/ exec echo nim compile src/fswatch.nim
@@ -27,7 +31,7 @@
 import ./fswatchpkg/fs_watcher_command
 
 proc main() =
-    # Einstiegspunkt in die Anwendung: fswatch.
+    # Einstiegspunkt in die Anwendung 'fswatch'
     let fsWatchCommand = (
         newFsWatcherCommand()
         .initWithDefaultConfigFiles()
